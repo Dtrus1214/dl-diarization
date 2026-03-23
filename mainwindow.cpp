@@ -1,0 +1,601 @@
+#include "mainwindow.h"
+#include "appconfig.h"
+#include "diarizationengine.h"
+
+#include <QAction>
+#include <QApplication>
+#include <QFileDialog>
+#include <QFile>
+#include <QFrame>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QEvent>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QMouseEvent>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QSlider>
+#include <QStatusBar>
+#include <QTextStream>
+#include <QVBoxLayout>
+#include <QWidget>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , m_centralWidget(nullptr)
+    , m_windowSurface(nullptr)
+    , m_rootLayout(nullptr)
+    , m_statusLabel(nullptr)
+    , m_versionLabel(nullptr)
+    , m_titleBarLabel(nullptr)
+    , m_inLayoutMenuBar(nullptr)
+    , m_minimizeButton(nullptr)
+    , m_maximizeButton(nullptr)
+    , m_closeButton(nullptr)
+    , m_importAction(nullptr)
+    , m_runAction(nullptr)
+    , m_exportAction(nullptr)
+    , m_aboutAction(nullptr)
+    , m_sensitivitySlider(nullptr)
+    , m_logsView(nullptr)
+    , m_timelineLayout(nullptr)
+    , m_timelineCard(nullptr)
+    , m_isDragging(false)
+    , m_engine(new DiarizationEngine(this))
+{
+    setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setMinimumSize(1100, 700);
+    setWindowTitle(QStringLiteral("%1 %2")
+                   .arg(AppConfig::productName(), AppConfig::versionLabel()));
+
+    createActions();
+    buildUi();
+    applyModernStyle();
+    updateStatus(QStringLiteral("Ready. Import audio to begin."));
+
+    connect(m_engine, &DiarizationEngine::logMessage, this, &MainWindow::onEngineLog);
+    connect(m_engine, &DiarizationEngine::finished, this, &MainWindow::onEngineFinished);
+    connect(m_engine, &DiarizationEngine::failed, this, &MainWindow::onEngineFailed);
+    connect(m_engine, &DiarizationEngine::runningChanged, this, &MainWindow::onEngineRunningChanged);
+}
+
+MainWindow::~MainWindow()
+{
+}
+
+void MainWindow::createActions()
+{
+    m_importAction = new QAction(QStringLiteral("&Import Audio..."), this);
+    m_runAction = new QAction(QStringLiteral("&Run Diarization"), this);
+    m_exportAction = new QAction(QStringLiteral("&Export Result..."), this);
+    m_aboutAction = new QAction(QStringLiteral("&About"), this);
+
+    connect(m_importAction, &QAction::triggered, this, &MainWindow::onImportAudio);
+    connect(m_runAction, &QAction::triggered, this, &MainWindow::onRunDiarization);
+    connect(m_exportAction, &QAction::triggered, this, &MainWindow::onExportResult);
+    connect(m_aboutAction, &QAction::triggered, this, &MainWindow::onShowAbout);
+}
+
+void MainWindow::createMenus(QMenuBar *menuBar)
+{
+    if (!menuBar) {
+        return;
+    }
+
+    QMenu *fileMenu = menuBar->addMenu(QStringLiteral("&File"));
+    fileMenu->addAction(m_importAction);
+    fileMenu->addAction(m_exportAction);
+    fileMenu->addSeparator();
+    fileMenu->addAction(QStringLiteral("E&xit"), qApp, &QApplication::quit);
+
+    QMenu *runMenu = menuBar->addMenu(QStringLiteral("&Run"));
+    runMenu->addAction(m_runAction);
+
+    QMenu *helpMenu = menuBar->addMenu(QStringLiteral("&Help"));
+    helpMenu->addAction(m_aboutAction);
+}
+
+void MainWindow::buildUi()
+{
+    QWidget *outer = new QWidget(this);
+    QVBoxLayout *outerLayout = new QVBoxLayout(outer);
+    outerLayout->setContentsMargins(10, 10, 10, 10);
+    outerLayout->setSpacing(0);
+
+    m_windowSurface = new QWidget(outer);
+    m_windowSurface->setObjectName(QStringLiteral("WindowSurface"));
+    outerLayout->addWidget(m_windowSurface);
+
+    m_centralWidget = m_windowSurface;
+    m_rootLayout = new QVBoxLayout(m_windowSurface);
+    m_rootLayout->setContentsMargins(24, 20, 24, 20);
+    m_rootLayout->setSpacing(16);
+
+    m_rootLayout->addWidget(buildTitleBar());
+    m_rootLayout->addWidget(buildMainMenuBar());
+    m_rootLayout->addWidget(buildHeader());
+    m_rootLayout->addWidget(buildContentArea(), 1);
+    m_rootLayout->addWidget(buildStatusStrip());
+
+    setCentralWidget(outer);
+    applyRoundedMask();
+}
+
+QWidget *MainWindow::buildMainMenuBar()
+{
+    QWidget *menuHost = new QWidget(m_centralWidget);
+    menuHost->setObjectName(QStringLiteral("MenuHost"));
+
+    QVBoxLayout *layout = new QVBoxLayout(menuHost);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    m_inLayoutMenuBar = new QMenuBar(menuHost);
+    m_inLayoutMenuBar->setObjectName(QStringLiteral("InLayoutMenuBar"));
+    createMenus(m_inLayoutMenuBar);
+    layout->addWidget(m_inLayoutMenuBar);
+
+    return menuHost;
+}
+
+QWidget *MainWindow::buildContentArea()
+{
+    QWidget *content = new QWidget(m_centralWidget);
+    content->setObjectName(QStringLiteral("ContentArea"));
+
+    QHBoxLayout *contentLayout = new QHBoxLayout(content);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(16);
+    contentLayout->addWidget(buildControls(), 1);
+    contentLayout->addWidget(buildResultPane(), 2);
+    return content;
+}
+
+QWidget *MainWindow::buildTitleBar()
+{
+    QWidget *titleBar = new QWidget(m_centralWidget);
+    titleBar->setObjectName(QStringLiteral("CustomTitleBar"));
+    titleBar->installEventFilter(this);
+
+    QHBoxLayout *layout = new QHBoxLayout(titleBar);
+    layout->setContentsMargins(10, 6, 10, 6);
+    layout->setSpacing(6);
+
+    m_titleBarLabel = new QLabel(
+                QStringLiteral("%1 %2").arg(AppConfig::productName(), AppConfig::versionLabel()),
+                titleBar);
+    m_titleBarLabel->setObjectName(QStringLiteral("TitleBarLabel"));
+    m_titleBarLabel->installEventFilter(this);
+
+    m_minimizeButton = new QPushButton(QStringLiteral("-"), titleBar);
+    m_maximizeButton = new QPushButton(QStringLiteral("[]"), titleBar);
+    m_closeButton = new QPushButton(QStringLiteral("x"), titleBar);
+
+    m_minimizeButton->setObjectName(QStringLiteral("TitleBarButton"));
+    m_maximizeButton->setObjectName(QStringLiteral("TitleBarButton"));
+    m_closeButton->setObjectName(QStringLiteral("TitleBarCloseButton"));
+
+    connect(m_minimizeButton, &QPushButton::clicked, this, &QWidget::showMinimized);
+    connect(m_maximizeButton, &QPushButton::clicked, this, &MainWindow::toggleMaximizeRestore);
+    connect(m_closeButton, &QPushButton::clicked, this, &QWidget::close);
+
+    layout->addWidget(m_titleBarLabel);
+    layout->addStretch();
+    layout->addWidget(m_minimizeButton);
+    layout->addWidget(m_maximizeButton);
+    layout->addWidget(m_closeButton);
+
+    return titleBar;
+}
+
+QWidget *MainWindow::buildHeader()
+{
+    QWidget *header = new QWidget(m_centralWidget);
+    header->setObjectName(QStringLiteral("HeaderBar"));
+
+    QHBoxLayout *layout = new QHBoxLayout(header);
+    layout->setContentsMargins(18, 14, 18, 14);
+
+    QLabel *title = new QLabel(AppConfig::productName(), header);
+    title->setObjectName(QStringLiteral("AppTitle"));
+
+    QLabel *subtitle = new QLabel(QStringLiteral("Speaker Diarization Workbench"), header);
+    subtitle->setObjectName(QStringLiteral("AppSubtitle"));
+
+    QVBoxLayout *titleLayout = new QVBoxLayout();
+    titleLayout->setSpacing(2);
+    titleLayout->addWidget(title);
+    titleLayout->addWidget(subtitle);
+
+    m_versionLabel = new QLabel(
+                QStringLiteral("%1 (%2)")
+                .arg(AppConfig::versionLabel(), AppConfig::buildLabel()),
+                header);
+    m_versionLabel->setObjectName(QStringLiteral("VersionChip"));
+
+    layout->addLayout(titleLayout);
+    layout->addStretch();
+    layout->addWidget(m_versionLabel);
+    return header;
+}
+
+QWidget *MainWindow::buildControls()
+{
+    QWidget *panel = new QWidget(m_centralWidget);
+    QVBoxLayout *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
+
+    QGroupBox *sourceCard = new QGroupBox(QStringLiteral("Input Source"), panel);
+    QVBoxLayout *sourceLayout = new QVBoxLayout(sourceCard);
+    QPushButton *importButton = new QPushButton(QStringLiteral("Import Audio"), sourceCard);
+    connect(importButton, &QPushButton::clicked, this, &MainWindow::onImportAudio);
+    sourceLayout->addWidget(new QLabel(QStringLiteral("WAV / FLAC / MP3 supported"), sourceCard));
+    sourceLayout->addWidget(importButton);
+    layout->addWidget(sourceCard);
+
+    QGroupBox *configCard = new QGroupBox(QStringLiteral("Diarization Settings"), panel);
+    QVBoxLayout *configLayout = new QVBoxLayout(configCard);
+    configLayout->addWidget(new QLabel(QStringLiteral("Speaker Sensitivity"), configCard));
+    m_sensitivitySlider = new QSlider(Qt::Horizontal, configCard);
+    m_sensitivitySlider->setRange(0, 100);
+    m_sensitivitySlider->setValue(60);
+    configLayout->addWidget(m_sensitivitySlider);
+
+    QPushButton *runButton = new QPushButton(QStringLiteral("Run Diarization"), configCard);
+    runButton->setObjectName(QStringLiteral("PrimaryButton"));
+    connect(runButton, &QPushButton::clicked, this, &MainWindow::onRunDiarization);
+    configLayout->addWidget(runButton);
+    layout->addWidget(configCard);
+
+    layout->addWidget(createCard(QStringLiteral("Pipeline"),
+                                 QStringLiteral("VAD -> Embeddings -> Clustering\n"
+                                                "Runtime profile: Balanced")));
+    layout->addStretch();
+
+    return panel;
+}
+
+QWidget *MainWindow::buildResultPane()
+{
+    QWidget *panel = new QWidget(m_centralWidget);
+    QVBoxLayout *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
+
+    m_timelineCard = new QGroupBox(QStringLiteral("Session Timeline"), panel);
+    m_timelineLayout = new QVBoxLayout(m_timelineCard);
+    m_timelineLayout->addWidget(new QLabel(QStringLiteral("No diarization run yet."), m_timelineCard));
+    layout->addWidget(m_timelineCard);
+
+    QGroupBox *logsCard = new QGroupBox(QStringLiteral("Processing Logs"), panel);
+    QVBoxLayout *logLayout = new QVBoxLayout(logsCard);
+    m_logsView = new QPlainTextEdit(logsCard);
+    m_logsView->setReadOnly(true);
+    m_logsView->setPlainText(QStringLiteral("[init] ready\n[model] awaiting input file"));
+    logLayout->addWidget(m_logsView);
+    layout->addWidget(logsCard, 1);
+
+    QHBoxLayout *actionsLayout = new QHBoxLayout();
+    actionsLayout->addStretch();
+    QPushButton *exportButton = new QPushButton(QStringLiteral("Export JSON"), panel);
+    connect(exportButton, &QPushButton::clicked, this, &MainWindow::onExportResult);
+    actionsLayout->addWidget(exportButton);
+    layout->addLayout(actionsLayout);
+
+    return panel;
+}
+
+QWidget *MainWindow::buildStatusStrip()
+{
+    QFrame *strip = new QFrame(m_centralWidget);
+    strip->setObjectName(QStringLiteral("StatusStrip"));
+    QHBoxLayout *layout = new QHBoxLayout(strip);
+    layout->setContentsMargins(14, 10, 14, 10);
+
+    m_statusLabel = new QLabel(QStringLiteral(""), strip);
+    m_statusLabel->setObjectName(QStringLiteral("StatusText"));
+    layout->addWidget(m_statusLabel);
+    layout->addStretch();
+
+    QLabel *footnote = new QLabel(QStringLiteral("Qt Dynamic UI"), strip);
+    footnote->setObjectName(QStringLiteral("StatusMuted"));
+    layout->addWidget(footnote);
+    return strip;
+}
+
+QWidget *MainWindow::createCard(const QString &title, const QString &bodyText)
+{
+    QGroupBox *card = new QGroupBox(title, m_centralWidget);
+    QVBoxLayout *layout = new QVBoxLayout(card);
+    QLabel *body = new QLabel(bodyText, card);
+    body->setWordWrap(true);
+    layout->addWidget(body);
+    return card;
+}
+
+void MainWindow::applyModernStyle()
+{
+    setStyleSheet(QStringLiteral(
+        "QMainWindow { background: transparent; }"
+        "#WindowSurface { background-color: #10131a; border: 1px solid #2a3346; border-radius: 16px; }"
+        "#CustomTitleBar { background: #131826; border: 1px solid #2a3346; border-radius: 10px; }"
+        "#MenuHost { background: transparent; }"
+        "#InLayoutMenuBar { background: #161b26; color: #e6e8ef; border: 1px solid #2a3346; border-radius: 10px; padding: 5px; }"
+        "#InLayoutMenuBar::item { background: transparent; padding: 6px 10px; border-radius: 6px; }"
+        "#InLayoutMenuBar::item:selected { background: #2d3548; }"
+        "#TitleBarLabel { color: #e6edff; font-size: 12px; font-weight: 600; }"
+        "#TitleBarButton { background: #25314a; color: #dce6ff; border: none; border-radius: 6px;"
+        "                  min-width: 28px; min-height: 22px; }"
+        "#TitleBarButton:hover { background: #2f3f5d; }"
+        "#TitleBarCloseButton { background: #6e2636; color: #ffe5eb; border: none; border-radius: 6px;"
+        "                      min-width: 28px; min-height: 22px; }"
+        "#TitleBarCloseButton:hover { background: #9b2d45; }"
+        "QMenu { background: #191f2d; color: #e6e8ef; border: 1px solid #2a3346; }"
+        "QMenu::item:selected { background: #2d3548; }"
+        "#HeaderBar { background: #161b26; border: 1px solid #2a3346; border-radius: 12px; }"
+        "#AppTitle { color: #eef2ff; font-size: 22px; font-weight: 700; }"
+        "#AppSubtitle { color: #9ca9bf; font-size: 12px; }"
+        "#VersionChip { background: #2d3548; color: #d7dff1; border-radius: 9px; padding: 6px 10px; }"
+        "QGroupBox { background: #161b26; border: 1px solid #2a3346; border-radius: 10px;"
+        "           margin-top: 10px; padding: 8px; color: #dfe5f5; font-weight: 600; }"
+        "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }"
+        "QLabel { color: #d4dceb; }"
+        "QPlainTextEdit { background: #111723; color: #b8c4d9; border: 1px solid #2a3346;"
+        "                 border-radius: 8px; selection-background-color: #3758a8; }"
+        "QPushButton { background: #25314a; color: #e8eefc; border: none; border-radius: 8px;"
+        "              padding: 8px 14px; }"
+        "QPushButton:hover { background: #2c3d5d; }"
+        "QPushButton:pressed { background: #1f2b40; }"
+        "#PrimaryButton { background: #3a67ff; color: white; font-weight: 600; }"
+        "#PrimaryButton:hover { background: #5880ff; }"
+        "QSlider::groove:horizontal { height: 6px; background: #2a3346; border-radius: 3px; }"
+        "QSlider::handle:horizontal { width: 14px; margin: -4px 0; border-radius: 7px;"
+        "                             background: #6f94ff; }"
+        "#StatusStrip { background: #161b26; border: 1px solid #2a3346; border-radius: 10px; }"
+        "#StatusText { color: #cfd7e6; }"
+        "#StatusMuted { color: #8e9ab0; }"
+    ));
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    const bool draggable = (watched && watched->objectName() == QStringLiteral("CustomTitleBar"))
+            || (watched && watched->objectName() == QStringLiteral("TitleBarLabel"));
+    if (!draggable) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        toggleMaximizeRestore();
+        return true;
+    }
+
+    if (event->type() == QEvent::MouseButtonPress) {
+        QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->button() == Qt::LeftButton) {
+            m_isDragging = true;
+            m_dragOffset = mouseEvent->globalPos() - frameGeometry().topLeft();
+            return true;
+        }
+    } else if (event->type() == QEvent::MouseMove) {
+        if (!m_isDragging || isMaximized()) {
+            return false;
+        }
+        QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
+        move(mouseEvent->globalPos() - m_dragOffset);
+        return true;
+    } else if (event->type() == QEvent::MouseButtonRelease) {
+        m_isDragging = false;
+    }
+
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    applyRoundedMask();
+}
+
+void MainWindow::applyRoundedMask()
+{
+    if (isMaximized()) {
+        clearMask();
+        return;
+    }
+
+    QRegion rounded(rect(), QRegion::Rectangle);
+    const int cornerRadius = 16;
+    const int diameter = cornerRadius * 2;
+
+    rounded -= QRegion(0, 0, cornerRadius, cornerRadius);
+    rounded -= QRegion(width() - cornerRadius, 0, cornerRadius, cornerRadius);
+    rounded -= QRegion(0, height() - cornerRadius, cornerRadius, cornerRadius);
+    rounded -= QRegion(width() - cornerRadius, height() - cornerRadius, cornerRadius, cornerRadius);
+
+    rounded += QRegion(0, 0, diameter, diameter, QRegion::Ellipse);
+    rounded += QRegion(width() - diameter, 0, diameter, diameter, QRegion::Ellipse);
+    rounded += QRegion(0, height() - diameter, diameter, diameter, QRegion::Ellipse);
+    rounded += QRegion(width() - diameter, height() - diameter, diameter, diameter, QRegion::Ellipse);
+    setMask(rounded);
+}
+
+void MainWindow::toggleMaximizeRestore()
+{
+    if (isMaximized()) {
+        showNormal();
+        if (m_maximizeButton) {
+            m_maximizeButton->setText(QStringLiteral("[]"));
+        }
+    } else {
+        showMaximized();
+        if (m_maximizeButton) {
+            m_maximizeButton->setText(QStringLiteral("o"));
+        }
+    }
+    applyRoundedMask();
+}
+
+void MainWindow::updateStatus(const QString &text)
+{
+    if (m_statusLabel) {
+        m_statusLabel->setText(text);
+    }
+
+    if (statusBar()) {
+        statusBar()->showMessage(text, 5000);
+    }
+}
+
+void MainWindow::onImportAudio()
+{
+    const QString selected = QFileDialog::getOpenFileName(
+                this,
+                QStringLiteral("Select audio file"),
+                QString(),
+                QStringLiteral("Audio Files (*.wav *.flac *.mp3)"));
+
+    if (selected.isEmpty()) {
+        updateStatus(QStringLiteral("Audio import canceled."));
+        return;
+    }
+
+    m_selectedAudioPath = selected;
+    appendLog(QStringLiteral("[input] %1").arg(selected));
+    updateStatus(QStringLiteral("Loaded audio: %1").arg(selected));
+}
+
+void MainWindow::onRunDiarization()
+{
+    if (m_selectedAudioPath.isEmpty()) {
+        updateStatus(QStringLiteral("Please import an audio file first."));
+        return;
+    }
+
+    appendLog(QStringLiteral("[run] diarization started"));
+    updateStatus(QStringLiteral("Diarization running..."));
+    m_engine->run(m_selectedAudioPath, m_sensitivitySlider ? m_sensitivitySlider->value() : 60);
+}
+
+void MainWindow::onExportResult()
+{
+    const QString outPath = QFileDialog::getSaveFileName(
+                this,
+                QStringLiteral("Export diarization result"),
+                QStringLiteral("diarization_result.json"),
+                QStringLiteral("JSON (*.json)"));
+
+    if (outPath.isEmpty()) {
+        updateStatus(QStringLiteral("Export canceled."));
+        return;
+    }
+
+    if (m_lastRawJson.isEmpty()) {
+        updateStatus(QStringLiteral("No diarization result available yet."));
+        return;
+    }
+
+    QFile outFile(outPath);
+    if (!outFile.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        updateStatus(QStringLiteral("Failed to write export file."));
+        return;
+    }
+
+    QTextStream stream(&outFile);
+    stream << m_lastRawJson;
+    outFile.close();
+
+    appendLog(QStringLiteral("[export] %1").arg(outPath));
+    updateStatus(QStringLiteral("Result exported to: %1").arg(outPath));
+}
+
+void MainWindow::onShowAbout()
+{
+    QMessageBox::about(this,
+                       QStringLiteral("About %1").arg(AppConfig::productName()),
+                       QStringLiteral("%1\nVersion: %2\nBuild: %3\n\n"
+                                      "Modern Qt Widgets UI built dynamically in C++.")
+                       .arg(AppConfig::productName(),
+                            AppConfig::version(),
+                            AppConfig::buildLabel()));
+}
+
+void MainWindow::onEngineLog(const QString &message)
+{
+    appendLog(QStringLiteral("[engine] %1").arg(message));
+}
+
+void MainWindow::onEngineFinished(const QList<SegmentResult> &segments, const QString &rawJson)
+{
+    m_lastRawJson = rawJson;
+    refreshTimeline(segments);
+    appendLog(QStringLiteral("[run] completed: %1 segments").arg(segments.size()));
+    updateStatus(QStringLiteral("Diarization completed successfully."));
+}
+
+void MainWindow::onEngineFailed(const QString &error)
+{
+    appendLog(QStringLiteral("[error] %1").arg(error));
+    updateStatus(QStringLiteral("Diarization failed."));
+}
+
+void MainWindow::onEngineRunningChanged(bool running)
+{
+    if (m_runAction) {
+        m_runAction->setEnabled(!running);
+    }
+    if (m_importAction) {
+        m_importAction->setEnabled(!running);
+    }
+}
+
+void MainWindow::refreshTimeline(const QList<SegmentResult> &segments)
+{
+    if (!m_timelineLayout || !m_timelineCard) {
+        return;
+    }
+
+    while (QLayoutItem *item = m_timelineLayout->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+
+    if (segments.isEmpty()) {
+        m_timelineLayout->addWidget(new QLabel(QStringLiteral("No segments returned."), m_timelineCard));
+        return;
+    }
+
+    for (const SegmentResult &segment : segments) {
+        const QString line = QStringLiteral("%1 - %2  |  %3")
+                .arg(formatTime(segment.startSec),
+                     formatTime(segment.endSec),
+                     segment.speaker);
+        m_timelineLayout->addWidget(new QLabel(line, m_timelineCard));
+    }
+    m_timelineLayout->addStretch();
+}
+
+void MainWindow::appendLog(const QString &line)
+{
+    if (!m_logsView) {
+        return;
+    }
+    m_logsView->appendPlainText(line);
+}
+
+QString MainWindow::formatTime(double sec) const
+{
+    const int total = static_cast<int>(sec);
+    const int mm = total / 60;
+    const int ss = total % 60;
+    return QStringLiteral("%1:%2")
+            .arg(mm, 2, 10, QLatin1Char('0'))
+            .arg(ss, 2, 10, QLatin1Char('0'));
+}
+
