@@ -3,6 +3,7 @@
 
 #include <QList>
 #include <QFutureWatcher>
+#include <QPoint>
 #include <QVector>
 #include <QWidget>
 
@@ -37,6 +38,7 @@ signals:
     void loadFinished(bool ok, const QString &message);
     void viewWindowChanged(double centerNorm, double spanNorm);
     void editedChanged(bool dirty);
+    void contextMenuRequested(const QPoint &globalPos);
 
 protected:
     void paintEvent(QPaintEvent *event) override;

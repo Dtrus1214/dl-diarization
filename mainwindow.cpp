@@ -17,6 +17,7 @@
 #include <QMediaPlayer>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QKeySequence>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -43,6 +44,10 @@ MainWindow::MainWindow(QWidget *parent)
     , m_importAction(nullptr)
     , m_runAction(nullptr)
     , m_exportAction(nullptr)
+    , m_cutAction(nullptr)
+    , m_copyAction(nullptr)
+    , m_pasteAction(nullptr)
+    , m_saveEditedAudioAction(nullptr)
     , m_aboutAction(nullptr)
     , m_sensitivitySlider(nullptr)
     , m_logsView(nullptr)
@@ -94,11 +99,25 @@ void MainWindow::createActions()
     m_importAction = new QAction(QStringLiteral("&Import Audio..."), this);
     m_runAction = new QAction(QStringLiteral("&Run Diarization"), this);
     m_exportAction = new QAction(QStringLiteral("&Export Result..."), this);
+    m_cutAction = new QAction(QStringLiteral("Cu&t"), this);
+    m_copyAction = new QAction(QStringLiteral("&Copy"), this);
+    m_pasteAction = new QAction(QStringLiteral("&Paste"), this);
+    m_saveEditedAudioAction = new QAction(QStringLiteral("&Save Edited Audio..."), this);
     m_aboutAction = new QAction(QStringLiteral("&About"), this);
+
+    m_cutAction->setShortcut(QKeySequence::Cut);
+    m_copyAction->setShortcut(QKeySequence::Copy);
+    m_pasteAction->setShortcut(QKeySequence::Paste);
+    m_saveEditedAudioAction->setShortcut(QKeySequence::Save);
+    m_saveEditedAudioAction->setEnabled(false);
 
     connect(m_importAction, &QAction::triggered, this, &MainWindow::onImportAudio);
     connect(m_runAction, &QAction::triggered, this, &MainWindow::onRunDiarization);
     connect(m_exportAction, &QAction::triggered, this, &MainWindow::onExportResult);
+    connect(m_cutAction, &QAction::triggered, this, &MainWindow::onWaveCut);
+    connect(m_copyAction, &QAction::triggered, this, &MainWindow::onWaveCopy);
+    connect(m_pasteAction, &QAction::triggered, this, &MainWindow::onWavePaste);
+    connect(m_saveEditedAudioAction, &QAction::triggered, this, &MainWindow::onSaveEditedAudio);
     connect(m_aboutAction, &QAction::triggered, this, &MainWindow::onShowAbout);
 }
 
@@ -116,6 +135,13 @@ void MainWindow::createMenus(QMenuBar *menuBar)
 
     QMenu *runMenu = menuBar->addMenu(QStringLiteral("&Run"));
     runMenu->addAction(m_runAction);
+
+    QMenu *editMenu = menuBar->addMenu(QStringLiteral("&Edit"));
+    editMenu->addAction(m_cutAction);
+    editMenu->addAction(m_copyAction);
+    editMenu->addAction(m_pasteAction);
+    editMenu->addSeparator();
+    editMenu->addAction(m_saveEditedAudioAction);
 
     QMenu *helpMenu = menuBar->addMenu(QStringLiteral("&Help"));
     helpMenu->addAction(m_aboutAction);
@@ -315,6 +341,7 @@ QWidget *MainWindow::buildResultPane()
     m_waveformView = new WaveformView(m_timelineCard);
     connect(m_waveformView, &WaveformView::segmentClicked, this, &MainWindow::onWaveformSegmentClicked);
     connect(m_waveformView, &WaveformView::cursorSelected, this, &MainWindow::onWaveformCursorSelected);
+    connect(m_waveformView, &WaveformView::contextMenuRequested, this, &MainWindow::onWaveformContextMenuRequested);
     connect(m_waveformView, &WaveformView::loadFinished, this, &MainWindow::onWaveformLoadFinished);
     connect(m_waveformView, &WaveformView::editedChanged, this, &MainWindow::onWaveEditedChanged);
     connect(zoomInBtn, &QPushButton::clicked, m_waveformView, &WaveformView::zoomIn);
@@ -740,6 +767,39 @@ void MainWindow::onWaveformCursorSelected(double sec)
     updateStatus(QStringLiteral("Cursor set to %1").arg(formatTime(sec)));
 }
 
+void MainWindow::onWaveformContextMenuRequested(const QPoint &globalPos)
+{
+    if (!m_waveformView) {
+        return;
+    }
+
+    if (m_cutAction) {
+        m_cutAction->setEnabled(m_waveformView->hasSelection());
+    }
+    if (m_copyAction) {
+        m_copyAction->setEnabled(m_waveformView->hasSelection());
+    }
+    if (m_saveEditedAudioAction) {
+        m_saveEditedAudioAction->setEnabled(m_waveformView->hasEdits());
+    }
+
+    QMenu menu(this);
+    if (m_cutAction) {
+        menu.addAction(m_cutAction);
+    }
+    if (m_copyAction) {
+        menu.addAction(m_copyAction);
+    }
+    if (m_pasteAction) {
+        menu.addAction(m_pasteAction);
+    }
+    menu.addSeparator();
+    if (m_saveEditedAudioAction) {
+        menu.addAction(m_saveEditedAudioAction);
+    }
+    menu.exec(globalPos);
+}
+
 void MainWindow::onWaveformLoadFinished(bool ok, const QString &message)
 {
     if (ok) {
@@ -810,6 +870,9 @@ void MainWindow::onWaveEditedChanged(bool dirty)
 {
     if (m_waveSaveButton) {
         m_waveSaveButton->setEnabled(dirty);
+    }
+    if (m_saveEditedAudioAction) {
+        m_saveEditedAudioAction->setEnabled(dirty);
     }
 }
 

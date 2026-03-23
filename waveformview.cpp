@@ -435,6 +435,12 @@ void WaveformView::paintEvent(QPaintEvent *event)
 
 void WaveformView::mousePressEvent(QMouseEvent *event)
 {
+    if (event->button() == Qt::RightButton) {
+        emit contextMenuRequested(mapToGlobal(event->pos()));
+        event->accept();
+        return;
+    }
+
     if (event->button() == Qt::LeftButton) {
         if (isInNavBar(event->x(), event->y())) {
             m_draggingNavBar = true;

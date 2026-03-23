@@ -46,6 +46,7 @@ private slots:
     void onEngineRunningChanged(bool running);
     void onWaveformSegmentClicked(int index);
     void onWaveformCursorSelected(double sec);
+    void onWaveformContextMenuRequested(const QPoint &globalPos);
     void onWaveformLoadFinished(bool ok, const QString &message);
     void onWaveCut();
     void onWaveCopy();
@@ -97,6 +98,10 @@ private:
     QAction *m_importAction;
     QAction *m_runAction;
     QAction *m_exportAction;
+    QAction *m_cutAction;
+    QAction *m_copyAction;
+    QAction *m_pasteAction;
+    QAction *m_saveEditedAudioAction;
     QAction *m_aboutAction;
 
     QSlider *m_sensitivitySlider;
