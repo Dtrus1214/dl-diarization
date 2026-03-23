@@ -1,8 +1,11 @@
 #include "waveformview.h"
 #include "diarizationengine.h"
 
+#include <QtConcurrent>
+
 #include <QByteArray>
 #include <QFile>
+#include <QFileInfo>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QWheelEvent>
@@ -38,91 +41,31 @@ WaveformView::WaveformView(QWidget *parent)
     , m_panMoved(false)
     , m_panStartX(0)
     , m_panStartCenterNorm(0.5)
+    , m_loading(false)
 {
     setMinimumHeight(140);
+    connect(&m_loadWatcher, &QFutureWatcher<LoadResult>::finished,
+            this, &WaveformView::onLoadTaskFinished);
+}
+
+WaveformView::~WaveformView()
+{
+    m_loadWatcher.waitForFinished();
 }
 
 bool WaveformView::loadAudio(const QString &audioPath)
 {
+    if (m_loading) {
+        return false;
+    }
+
     clearData();
-
-    QFile file(audioPath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        update();
-        return false;
-    }
-
-    const QByteArray wav = file.readAll();
-    file.close();
-
-    if (wav.size() < 44 || !wav.startsWith("RIFF") || wav.mid(8, 4) != "WAVE") {
-        update();
-        return false;
-    }
-
-    const int fmtOffset = wav.indexOf("fmt ");
-    const int dataTagOffset = wav.indexOf("data");
-    if (fmtOffset < 0 || dataTagOffset < 0) {
-        update();
-        return false;
-    }
-
-    const quint32 fmtSize = readU32LE(wav, fmtOffset + 4);
-    const int fmtDataOffset = fmtOffset + 8;
-    if (fmtDataOffset + static_cast<int>(fmtSize) > wav.size()) {
-        update();
-        return false;
-    }
-
-    const quint16 audioFormat = readU16LE(wav, fmtDataOffset);
-    const quint16 channels = readU16LE(wav, fmtDataOffset + 2);
-    m_sampleRate = static_cast<int>(readU32LE(wav, fmtDataOffset + 4));
-    const quint16 bitsPerSample = readU16LE(wav, fmtDataOffset + 14);
-    if (audioFormat != 1 || bitsPerSample != 16 || channels == 0 || m_sampleRate <= 0) {
-        update();
-        return false;
-    }
-
-    const quint32 dataSize = readU32LE(wav, dataTagOffset + 4);
-    const int dataStart = dataTagOffset + 8;
-    if (dataStart + static_cast<int>(dataSize) > wav.size()) {
-        update();
-        return false;
-    }
-
-    const int bytesPerFrame = static_cast<int>(channels) * 2;
-    m_totalFrames = static_cast<int>(dataSize) / bytesPerFrame;
-    if (m_totalFrames <= 0) {
-        update();
-        return false;
-    }
-
-    const int peakCount = 1200;
-    m_peaks.resize(peakCount);
-    for (int i = 0; i < peakCount; ++i) {
-        m_peaks[i] = 0.0f;
-    }
-
-    const int framesPerBucket = qMax(1, m_totalFrames / peakCount);
-    for (int b = 0; b < peakCount; ++b) {
-        const int startFrame = b * framesPerBucket;
-        const int endFrame = qMin(m_totalFrames, startFrame + framesPerBucket);
-        float maxAbs = 0.0f;
-
-        for (int frame = startFrame; frame < endFrame; ++frame) {
-            const int frameOffset = dataStart + (frame * bytesPerFrame);
-            const qint16 sample = static_cast<qint16>(
-                        static_cast<unsigned char>(wav[frameOffset]) |
-                        (static_cast<unsigned char>(wav[frameOffset + 1]) << 8));
-            const float normalized = qAbs(static_cast<float>(sample)) / 32768.0f;
-            if (normalized > maxAbs) {
-                maxAbs = normalized;
-            }
-        }
-        m_peaks[b] = maxAbs;
-    }
-
+    m_loading = true;
     update();
+
+    m_loadWatcher.setFuture(QtConcurrent::run([audioPath]() {
+        return WaveformView::loadPeaksFromWav(audioPath);
+    }));
     return true;
 }
 
@@ -145,6 +88,7 @@ void WaveformView::clearData()
     m_panMoved = false;
     m_panStartX = 0;
     m_panStartCenterNorm = 0.5;
+    m_loading = false;
 }
 
 void WaveformView::zoomIn()
@@ -187,7 +131,10 @@ void WaveformView::paintEvent(QPaintEvent *event)
 
     if (m_peaks.isEmpty()) {
         painter.setPen(QColor("#7f8ca4"));
-        painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("Waveform preview (WAV 16-bit PCM)"));
+        const QString text = m_loading
+                ? QStringLiteral("Loading waveform...")
+                : QStringLiteral("Waveform preview (WAV 16-bit PCM)");
+        painter.drawText(rect(), Qt::AlignCenter, text);
         return;
     }
 
@@ -420,4 +367,139 @@ void WaveformView::zoomByFactor(double scale, int anchorX)
     m_zoomFactor = newZoom;
     m_centerNorm = newStart + (newSpan / 2.0);
     update();
+}
+
+WaveformView::LoadResult WaveformView::loadPeaksFromWav(const QString &audioPath)
+{
+    LoadResult r{};
+    r.ok = false;
+    r.sampleRate = 0;
+    r.totalFrames = 0;
+
+    QFile file(audioPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        r.error = QStringLiteral("Unable to open audio file.");
+        return r;
+    }
+
+    if (file.size() < 44) {
+        r.error = QStringLiteral("Invalid WAV file.");
+        return r;
+    }
+
+    const QByteArray riff = file.read(12);
+    if (riff.size() < 12 || riff.mid(0, 4) != "RIFF" || riff.mid(8, 4) != "WAVE") {
+        r.error = QStringLiteral("Only WAV files are supported.");
+        return r;
+    }
+
+    quint16 audioFormat = 0;
+    quint16 channels = 0;
+    quint16 bitsPerSample = 0;
+    qint64 dataStart = -1;
+    qint64 dataSize = -1;
+
+    while (!file.atEnd()) {
+        const QByteArray chunkHeader = file.read(8);
+        if (chunkHeader.size() < 8) {
+            break;
+        }
+
+        const QByteArray chunkId = chunkHeader.mid(0, 4);
+        const quint32 chunkSize = readU32LE(chunkHeader, 4);
+        const qint64 chunkDataPos = file.pos();
+
+        if (chunkId == "fmt ") {
+            const QByteArray fmt = file.read(chunkSize);
+            if (fmt.size() < 16) {
+                r.error = QStringLiteral("Corrupt WAV fmt chunk.");
+                return r;
+            }
+            audioFormat = readU16LE(fmt, 0);
+            channels = readU16LE(fmt, 2);
+            r.sampleRate = static_cast<int>(readU32LE(fmt, 4));
+            bitsPerSample = readU16LE(fmt, 14);
+        } else if (chunkId == "data") {
+            dataStart = chunkDataPos;
+            dataSize = static_cast<qint64>(chunkSize);
+            break;
+        } else {
+            file.seek(chunkDataPos + chunkSize);
+        }
+    }
+
+    if (audioFormat != 1 || bitsPerSample != 16 || channels == 0 || r.sampleRate <= 0) {
+        r.error = QStringLiteral("Requires 16-bit PCM WAV.");
+        return r;
+    }
+    if (dataStart < 0 || dataSize <= 0) {
+        r.error = QStringLiteral("No WAV data chunk found.");
+        return r;
+    }
+
+    const int bytesPerFrame = static_cast<int>(channels) * 2;
+    r.totalFrames = dataSize / bytesPerFrame;
+    if (r.totalFrames <= 0) {
+        r.error = QStringLiteral("Audio has no samples.");
+        return r;
+    }
+
+    const int peakCount = 1200;
+    r.peaks = QVector<float>(peakCount, 0.0f);
+    const qint64 framesPerBucket = qMax<qint64>(1, r.totalFrames / peakCount);
+
+    if (!file.seek(dataStart)) {
+        r.error = QStringLiteral("Failed to seek WAV data.");
+        return r;
+    }
+
+    const qint64 chunkBytes = 1 * 1024 * 1024;
+    qint64 bytesProcessed = 0;
+    qint64 frameIndex = 0;
+
+    while (bytesProcessed < dataSize && !file.atEnd()) {
+        const qint64 toRead = qMin(chunkBytes, dataSize - bytesProcessed);
+        const QByteArray chunk = file.read(toRead);
+        if (chunk.isEmpty()) {
+            break;
+        }
+
+        const int chunkFrameCount = chunk.size() / bytesPerFrame;
+        for (int frame = 0; frame < chunkFrameCount; ++frame, ++frameIndex) {
+            const int sampleOffset = frame * bytesPerFrame;
+            const qint16 sample = static_cast<qint16>(
+                        static_cast<unsigned char>(chunk[sampleOffset]) |
+                        (static_cast<unsigned char>(chunk[sampleOffset + 1]) << 8));
+            const float normalized = qAbs(static_cast<float>(sample)) / 32768.0f;
+            const int bucket = qMin(peakCount - 1, static_cast<int>(frameIndex / framesPerBucket));
+            if (normalized > r.peaks[bucket]) {
+                r.peaks[bucket] = normalized;
+            }
+        }
+
+        bytesProcessed += static_cast<qint64>(chunkFrameCount) * bytesPerFrame;
+    }
+
+    r.ok = true;
+    return r;
+}
+
+void WaveformView::onLoadTaskFinished()
+{
+    const LoadResult r = m_loadWatcher.result();
+    m_loading = false;
+
+    if (!r.ok) {
+        clearData();
+        m_loading = false;
+        update();
+        emit loadFinished(false, r.error);
+        return;
+    }
+
+    m_peaks = r.peaks;
+    m_sampleRate = r.sampleRate;
+    m_totalFrames = r.totalFrames;
+    update();
+    emit loadFinished(true, QString());
 }

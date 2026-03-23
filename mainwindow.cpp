@@ -302,6 +302,7 @@ QWidget *MainWindow::buildResultPane()
     m_waveformView = new WaveformView(m_timelineCard);
     connect(m_waveformView, &WaveformView::segmentClicked, this, &MainWindow::onWaveformSegmentClicked);
     connect(m_waveformView, &WaveformView::cursorSelected, this, &MainWindow::onWaveformCursorSelected);
+    connect(m_waveformView, &WaveformView::loadFinished, this, &MainWindow::onWaveformLoadFinished);
     connect(zoomInBtn, &QPushButton::clicked, m_waveformView, &WaveformView::zoomIn);
     connect(zoomOutBtn, &QPushButton::clicked, m_waveformView, &WaveformView::zoomOut);
     connect(zoomResetBtn, &QPushButton::clicked, m_waveformView, &WaveformView::resetZoom);
@@ -515,9 +516,9 @@ void MainWindow::onImportAudio()
     if (m_waveformView && m_waveformView->loadAudio(selected)) {
         m_waveformView->setPlaybackPositionSec(0.0);
         m_waveformView->setPlaybackActive(false);
-        appendLog(QStringLiteral("[wave] waveform loaded"));
+        appendLog(QStringLiteral("[wave] loading waveform..."));
     } else {
-        appendLog(QStringLiteral("[wave] failed to load waveform preview"));
+        appendLog(QStringLiteral("[wave] waveform loader is busy"));
     }
     appendLog(QStringLiteral("[input] %1").arg(selected));
     updateStatus(QStringLiteral("Loaded audio: %1").arg(selected));
@@ -719,6 +720,16 @@ void MainWindow::onWaveformCursorSelected(double sec)
         m_waveformView->setPlaybackPositionSec(sec);
     }
     updateStatus(QStringLiteral("Cursor set to %1").arg(formatTime(sec)));
+}
+
+void MainWindow::onWaveformLoadFinished(bool ok, const QString &message)
+{
+    if (ok) {
+        appendLog(QStringLiteral("[wave] waveform loaded"));
+        return;
+    }
+
+    appendLog(QStringLiteral("[wave] failed to load waveform: %1").arg(message));
 }
 
 void MainWindow::onToggleWaveformPlayback()

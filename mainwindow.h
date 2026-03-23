@@ -46,6 +46,7 @@ private slots:
     void onEngineRunningChanged(bool running);
     void onWaveformSegmentClicked(int index);
     void onWaveformCursorSelected(double sec);
+    void onWaveformLoadFinished(bool ok, const QString &message);
     void onToggleWaveformPlayback();
     void onPlayerPositionChanged(qint64 positionMs);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
