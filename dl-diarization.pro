@@ -1,4 +1,4 @@
-QT       += core gui concurrent
+QT       += core gui concurrent multimedia
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -19,12 +19,14 @@ SOURCES += \
     appconfig.cpp \
     diarizationengine.cpp \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    waveformview.cpp
 
 HEADERS += \
     appconfig.h \
     diarizationengine.h \
-    mainwindow.h
+    mainwindow.h \
+    waveformview.h
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

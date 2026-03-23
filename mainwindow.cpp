@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "appconfig.h"
 #include "diarizationengine.h"
+#include "waveformview.h"
 
 #include <QAction>
 #include <QApplication>
@@ -13,6 +14,7 @@
 #include <QEvent>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMediaPlayer>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
@@ -21,6 +23,8 @@
 #include <QSlider>
 #include <QStatusBar>
 #include <QTextStream>
+#include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -44,8 +48,12 @@ MainWindow::MainWindow(QWidget *parent)
     , m_logsView(nullptr)
     , m_timelineLayout(nullptr)
     , m_timelineCard(nullptr)
+    , m_waveformView(nullptr)
+    , m_playPauseButton(nullptr)
     , m_isDragging(false)
     , m_engine(new DiarizationEngine(this))
+    , m_player(new QMediaPlayer(this))
+    , m_segmentStopTimer(new QTimer(this))
 {
     setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -62,6 +70,15 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_engine, &DiarizationEngine::finished, this, &MainWindow::onEngineFinished);
     connect(m_engine, &DiarizationEngine::failed, this, &MainWindow::onEngineFailed);
     connect(m_engine, &DiarizationEngine::runningChanged, this, &MainWindow::onEngineRunningChanged);
+
+    m_segmentStopTimer->setSingleShot(true);
+    connect(m_segmentStopTimer, &QTimer::timeout, this, &MainWindow::stopSegmentPlayback);
+    connect(m_player, &QMediaPlayer::positionChanged, this, &MainWindow::onPlayerPositionChanged);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    connect(m_player, &QMediaPlayer::playbackStateChanged, this, &MainWindow::onPlayerPlaybackStateChanged);
+#else
+    connect(m_player, &QMediaPlayer::stateChanged, this, &MainWindow::onPlayerStateChanged);
+#endif
 }
 
 MainWindow::~MainWindow()
@@ -270,6 +287,27 @@ QWidget *MainWindow::buildResultPane()
 
     m_timelineCard = new QGroupBox(QStringLiteral("Session Timeline"), panel);
     m_timelineLayout = new QVBoxLayout(m_timelineCard);
+    QHBoxLayout *waveControls = new QHBoxLayout();
+    QPushButton *zoomInBtn = new QPushButton(QStringLiteral("Zoom In +"), m_timelineCard);
+    QPushButton *zoomOutBtn = new QPushButton(QStringLiteral("Zoom Out -"), m_timelineCard);
+    QPushButton *zoomResetBtn = new QPushButton(QStringLiteral("Reset"), m_timelineCard);
+    m_playPauseButton = new QPushButton(QStringLiteral("Play"), m_timelineCard);
+    waveControls->addStretch();
+    waveControls->addWidget(m_playPauseButton);
+    waveControls->addWidget(zoomOutBtn);
+    waveControls->addWidget(zoomInBtn);
+    waveControls->addWidget(zoomResetBtn);
+    m_timelineLayout->addLayout(waveControls);
+
+    m_waveformView = new WaveformView(m_timelineCard);
+    connect(m_waveformView, &WaveformView::segmentClicked, this, &MainWindow::onWaveformSegmentClicked);
+    connect(m_waveformView, &WaveformView::cursorSelected, this, &MainWindow::onWaveformCursorSelected);
+    connect(zoomInBtn, &QPushButton::clicked, m_waveformView, &WaveformView::zoomIn);
+    connect(zoomOutBtn, &QPushButton::clicked, m_waveformView, &WaveformView::zoomOut);
+    connect(zoomResetBtn, &QPushButton::clicked, m_waveformView, &WaveformView::resetZoom);
+    connect(m_playPauseButton, &QPushButton::clicked, this, &MainWindow::onToggleWaveformPlayback);
+    m_timelineLayout->addWidget(m_waveformView);
+    m_timelineLayout->addWidget(new QLabel(QStringLiteral("Click colored region to listen segment"), m_timelineCard));
     m_timelineLayout->addWidget(new QLabel(QStringLiteral("No diarization run yet."), m_timelineCard));
     layout->addWidget(m_timelineCard);
 
@@ -348,6 +386,7 @@ void MainWindow::applyModernStyle()
         "QLabel { color: #d4dceb; }"
         "QPlainTextEdit { background: #111723; color: #b8c4d9; border: 1px solid #2a3346;"
         "                 border-radius: 8px; selection-background-color: #3758a8; }"
+        "WaveformView { border: 1px solid #2a3346; border-radius: 8px; background: #111723; }"
         "QPushButton { background: #25314a; color: #e8eefc; border: none; border-radius: 8px;"
         "              padding: 8px 14px; }"
         "QPushButton:hover { background: #2c3d5d; }"
@@ -467,6 +506,19 @@ void MainWindow::onImportAudio()
     }
 
     m_selectedAudioPath = selected;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    m_player->setSource(QUrl::fromLocalFile(m_selectedAudioPath));
+#else
+    m_player->setMedia(QUrl::fromLocalFile(m_selectedAudioPath));
+#endif
+    m_player->setPosition(0);
+    if (m_waveformView && m_waveformView->loadAudio(selected)) {
+        m_waveformView->setPlaybackPositionSec(0.0);
+        m_waveformView->setPlaybackActive(false);
+        appendLog(QStringLiteral("[wave] waveform loaded"));
+    } else {
+        appendLog(QStringLiteral("[wave] failed to load waveform preview"));
+    }
     appendLog(QStringLiteral("[input] %1").arg(selected));
     updateStatus(QStringLiteral("Loaded audio: %1").arg(selected));
 }
@@ -534,6 +586,7 @@ void MainWindow::onEngineLog(const QString &message)
 void MainWindow::onEngineFinished(const QList<SegmentResult> &segments, const QString &rawJson)
 {
     m_lastRawJson = rawJson;
+    m_lastSegments = segments;
     refreshTimeline(segments);
     appendLog(QStringLiteral("[run] completed: %1 segments").arg(segments.size()));
     updateStatus(QStringLiteral("Diarization completed successfully."));
@@ -561,9 +614,16 @@ void MainWindow::refreshTimeline(const QList<SegmentResult> &segments)
         return;
     }
 
-    while (QLayoutItem *item = m_timelineLayout->takeAt(0)) {
-        delete item->widget();
-        delete item;
+    if (m_waveformView) {
+        m_waveformView->setSegments(segments);
+    }
+
+    while (m_timelineLayout->count() > 3) {
+        QLayoutItem *item = m_timelineLayout->takeAt(3);
+        if (item) {
+            delete item->widget();
+            delete item;
+        }
     }
 
     if (segments.isEmpty()) {
@@ -571,12 +631,14 @@ void MainWindow::refreshTimeline(const QList<SegmentResult> &segments)
         return;
     }
 
-    for (const SegmentResult &segment : segments) {
+    for (int i = 0; i < segments.size(); ++i) {
+        const SegmentResult &segment = segments.at(i);
         const QString line = QStringLiteral("%1 - %2  |  %3")
                 .arg(formatTime(segment.startSec),
                      formatTime(segment.endSec),
                      segment.speaker);
-        m_timelineLayout->addWidget(new QLabel(line, m_timelineCard));
+        QLabel *lbl = new QLabel(QStringLiteral("[%1] %2").arg(i + 1).arg(line), m_timelineCard);
+        m_timelineLayout->addWidget(lbl);
     }
     m_timelineLayout->addStretch();
 }
@@ -598,4 +660,133 @@ QString MainWindow::formatTime(double sec) const
             .arg(mm, 2, 10, QLatin1Char('0'))
             .arg(ss, 2, 10, QLatin1Char('0'));
 }
+
+void MainWindow::onWaveformSegmentClicked(int index)
+{
+    if (index < 0 || index >= m_lastSegments.size()) {
+        return;
+    }
+    if (m_selectedAudioPath.isEmpty()) {
+        updateStatus(QStringLiteral("Import audio first."));
+        return;
+    }
+
+    const SegmentResult &segment = m_lastSegments.at(index);
+    const qint64 startMs = static_cast<qint64>(segment.startSec * 1000.0);
+    const qint64 durationMs = qMax<qint64>(200, static_cast<qint64>((segment.endSec - segment.startSec) * 1000.0));
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    m_player->setSource(QUrl::fromLocalFile(m_selectedAudioPath));
+#else
+    m_player->setMedia(QUrl::fromLocalFile(m_selectedAudioPath));
+#endif
+    m_player->setPosition(startMs);
+    m_player->play();
+    if (m_playPauseButton) {
+        m_playPauseButton->setText(QStringLiteral("Pause"));
+    }
+    m_segmentStopTimer->start(static_cast<int>(durationMs));
+
+    appendLog(QStringLiteral("[play] segment %1 (%2 - %3)")
+              .arg(index + 1)
+              .arg(formatTime(segment.startSec))
+              .arg(formatTime(segment.endSec)));
+    updateStatus(QStringLiteral("Playing segment %1").arg(index + 1));
+}
+
+void MainWindow::stopSegmentPlayback()
+{
+    if (m_player) {
+        m_player->stop();
+    }
+    if (m_playPauseButton) {
+        m_playPauseButton->setText(QStringLiteral("Play"));
+    }
+    if (m_waveformView) {
+        m_waveformView->setPlaybackActive(false);
+    }
+}
+
+void MainWindow::onWaveformCursorSelected(double sec)
+{
+    if (m_selectedAudioPath.isEmpty()) {
+        return;
+    }
+
+    m_segmentStopTimer->stop();
+    m_player->setPosition(static_cast<qint64>(sec * 1000.0));
+    if (m_waveformView) {
+        m_waveformView->setPlaybackPositionSec(sec);
+    }
+    updateStatus(QStringLiteral("Cursor set to %1").arg(formatTime(sec)));
+}
+
+void MainWindow::onToggleWaveformPlayback()
+{
+    if (m_selectedAudioPath.isEmpty()) {
+        updateStatus(QStringLiteral("Import audio first."));
+        return;
+    }
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    const bool currentlyPlaying = (m_player->playbackState() == QMediaPlayer::PlayingState);
+#else
+    const bool currentlyPlaying = (m_player->state() == QMediaPlayer::PlayingState);
+#endif
+    if (currentlyPlaying) {
+        m_player->pause();
+        if (m_playPauseButton) {
+            m_playPauseButton->setText(QStringLiteral("Play"));
+        }
+        updateStatus(QStringLiteral("Playback paused."));
+        return;
+    }
+
+    m_segmentStopTimer->stop();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    if (m_player->source().isEmpty()) {
+        m_player->setSource(QUrl::fromLocalFile(m_selectedAudioPath));
+    }
+#else
+    if (m_player->media().isNull()) {
+        m_player->setMedia(QUrl::fromLocalFile(m_selectedAudioPath));
+    }
+#endif
+    m_player->play();
+    if (m_playPauseButton) {
+        m_playPauseButton->setText(QStringLiteral("Pause"));
+    }
+    updateStatus(QStringLiteral("Playback running."));
+}
+
+void MainWindow::onPlayerPositionChanged(qint64 positionMs)
+{
+    if (m_waveformView) {
+        m_waveformView->setPlaybackPositionSec(static_cast<double>(positionMs) / 1000.0);
+    }
+}
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+void MainWindow::onPlayerPlaybackStateChanged(QMediaPlayer::PlaybackState state)
+{
+    const bool playing = (state == QMediaPlayer::PlayingState);
+    if (m_waveformView) {
+        m_waveformView->setPlaybackActive(playing);
+    }
+    if (m_playPauseButton) {
+        m_playPauseButton->setText(playing ? QStringLiteral("Pause") : QStringLiteral("Play"));
+    }
+}
+#else
+void MainWindow::onPlayerStateChanged(QMediaPlayer::State state)
+{
+    const bool playing = (state == QMediaPlayer::PlayingState);
+    if (m_waveformView) {
+        m_waveformView->setPlaybackActive(playing);
+    }
+    if (m_playPauseButton) {
+        m_playPauseButton->setText(playing ? QStringLiteral("Pause") : QStringLiteral("Play"));
+    }
+}
+#endif
 

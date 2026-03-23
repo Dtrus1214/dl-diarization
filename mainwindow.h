@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QMediaPlayer>
 #include <QList>
 #include <QPoint>
 #include <QString>
@@ -9,11 +10,14 @@
 class QAction;
 class DiarizationEngine;
 class QLabel;
+class QMediaPlayer;
 class QMenuBar;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
+class QTimer;
 class QVBoxLayout;
+class WaveformView;
 class QWidget;
 class QGroupBox;
 
@@ -40,6 +44,16 @@ private slots:
     void onEngineFinished(const QList<SegmentResult> &segments, const QString &rawJson);
     void onEngineFailed(const QString &error);
     void onEngineRunningChanged(bool running);
+    void onWaveformSegmentClicked(int index);
+    void onWaveformCursorSelected(double sec);
+    void onToggleWaveformPlayback();
+    void onPlayerPositionChanged(qint64 positionMs);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    void onPlayerPlaybackStateChanged(QMediaPlayer::PlaybackState state);
+#else
+    void onPlayerStateChanged(QMediaPlayer::State state);
+#endif
+    void stopSegmentPlayback();
 
 private:
     void buildUi();
@@ -83,13 +97,18 @@ private:
     QPlainTextEdit *m_logsView;
     QVBoxLayout *m_timelineLayout;
     QGroupBox *m_timelineCard;
+    WaveformView *m_waveformView;
+    QPushButton *m_playPauseButton;
 
     QString m_selectedAudioPath;
     QString m_lastRawJson;
+    QList<SegmentResult> m_lastSegments;
     bool m_isDragging;
     QPoint m_dragOffset;
 
     DiarizationEngine *m_engine;
+    QMediaPlayer *m_player;
+    QTimer *m_segmentStopTimer;
 };
 
 #endif // MAINWINDOW_H
