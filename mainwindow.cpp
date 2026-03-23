@@ -50,6 +50,10 @@ MainWindow::MainWindow(QWidget *parent)
     , m_timelineCard(nullptr)
     , m_waveformView(nullptr)
     , m_playPauseButton(nullptr)
+    , m_waveCutButton(nullptr)
+    , m_waveCopyButton(nullptr)
+    , m_wavePasteButton(nullptr)
+    , m_waveSaveButton(nullptr)
     , m_isDragging(false)
     , m_engine(new DiarizationEngine(this))
     , m_player(new QMediaPlayer(this))
@@ -292,7 +296,16 @@ QWidget *MainWindow::buildResultPane()
     QPushButton *zoomOutBtn = new QPushButton(QStringLiteral("Zoom Out -"), m_timelineCard);
     QPushButton *zoomResetBtn = new QPushButton(QStringLiteral("Reset"), m_timelineCard);
     m_playPauseButton = new QPushButton(QStringLiteral("Play"), m_timelineCard);
+    m_waveCutButton = new QPushButton(QStringLiteral("Cut"), m_timelineCard);
+    m_waveCopyButton = new QPushButton(QStringLiteral("Copy"), m_timelineCard);
+    m_wavePasteButton = new QPushButton(QStringLiteral("Paste"), m_timelineCard);
+    m_waveSaveButton = new QPushButton(QStringLiteral("Save Edited"), m_timelineCard);
+    m_waveSaveButton->setEnabled(false);
     waveControls->addStretch();
+    waveControls->addWidget(m_waveCutButton);
+    waveControls->addWidget(m_waveCopyButton);
+    waveControls->addWidget(m_wavePasteButton);
+    waveControls->addWidget(m_waveSaveButton);
     waveControls->addWidget(m_playPauseButton);
     waveControls->addWidget(zoomOutBtn);
     waveControls->addWidget(zoomInBtn);
@@ -303,10 +316,15 @@ QWidget *MainWindow::buildResultPane()
     connect(m_waveformView, &WaveformView::segmentClicked, this, &MainWindow::onWaveformSegmentClicked);
     connect(m_waveformView, &WaveformView::cursorSelected, this, &MainWindow::onWaveformCursorSelected);
     connect(m_waveformView, &WaveformView::loadFinished, this, &MainWindow::onWaveformLoadFinished);
+    connect(m_waveformView, &WaveformView::editedChanged, this, &MainWindow::onWaveEditedChanged);
     connect(zoomInBtn, &QPushButton::clicked, m_waveformView, &WaveformView::zoomIn);
     connect(zoomOutBtn, &QPushButton::clicked, m_waveformView, &WaveformView::zoomOut);
     connect(zoomResetBtn, &QPushButton::clicked, m_waveformView, &WaveformView::resetZoom);
     connect(m_playPauseButton, &QPushButton::clicked, this, &MainWindow::onToggleWaveformPlayback);
+    connect(m_waveCutButton, &QPushButton::clicked, this, &MainWindow::onWaveCut);
+    connect(m_waveCopyButton, &QPushButton::clicked, this, &MainWindow::onWaveCopy);
+    connect(m_wavePasteButton, &QPushButton::clicked, this, &MainWindow::onWavePaste);
+    connect(m_waveSaveButton, &QPushButton::clicked, this, &MainWindow::onSaveEditedAudio);
     m_timelineLayout->addWidget(m_waveformView);
     m_timelineLayout->addWidget(new QLabel(QStringLiteral("Click colored region to listen segment"), m_timelineCard));
     m_timelineLayout->addWidget(new QLabel(QStringLiteral("No diarization run yet."), m_timelineCard));
@@ -732,10 +750,77 @@ void MainWindow::onWaveformLoadFinished(bool ok, const QString &message)
     appendLog(QStringLiteral("[wave] failed to load waveform: %1").arg(message));
 }
 
+void MainWindow::onWaveCut()
+{
+    if (!m_waveformView || !m_waveformView->cutSelection()) {
+        updateStatus(QStringLiteral("Cut failed. Select a region first."));
+        return;
+    }
+    appendLog(QStringLiteral("[edit] cut selection"));
+    updateStatus(QStringLiteral("Selection cut."));
+}
+
+void MainWindow::onWaveCopy()
+{
+    if (!m_waveformView || !m_waveformView->copySelection()) {
+        updateStatus(QStringLiteral("Copy failed. Select a region first."));
+        return;
+    }
+    appendLog(QStringLiteral("[edit] copied selection"));
+    updateStatus(QStringLiteral("Selection copied."));
+}
+
+void MainWindow::onWavePaste()
+{
+    if (!m_waveformView || !m_waveformView->pasteAtCursor()) {
+        updateStatus(QStringLiteral("Paste failed. Copy a selection first."));
+        return;
+    }
+    appendLog(QStringLiteral("[edit] pasted at cursor"));
+    updateStatus(QStringLiteral("Audio pasted at cursor."));
+}
+
+void MainWindow::onSaveEditedAudio()
+{
+    if (!m_waveformView || !m_waveformView->hasEdits()) {
+        updateStatus(QStringLiteral("No unsaved edits."));
+        return;
+    }
+
+    const QString savePath = QFileDialog::getSaveFileName(
+                this,
+                QStringLiteral("Save edited audio"),
+                QStringLiteral("edited_audio.wav"),
+                QStringLiteral("WAV (*.wav)"));
+    if (savePath.isEmpty()) {
+        return;
+    }
+
+    QString error;
+    if (!m_waveformView->saveToFile(savePath, &error)) {
+        updateStatus(QStringLiteral("Save failed: %1").arg(error));
+        return;
+    }
+
+    appendLog(QStringLiteral("[edit] saved: %1").arg(savePath));
+    updateStatus(QStringLiteral("Edited audio saved."));
+}
+
+void MainWindow::onWaveEditedChanged(bool dirty)
+{
+    if (m_waveSaveButton) {
+        m_waveSaveButton->setEnabled(dirty);
+    }
+}
+
 void MainWindow::onToggleWaveformPlayback()
 {
     if (m_selectedAudioPath.isEmpty()) {
         updateStatus(QStringLiteral("Import audio first."));
+        return;
+    }
+    if (m_waveformView && m_waveformView->hasEdits()) {
+        updateStatus(QStringLiteral("You have unsaved edits. Save edited audio before playback."));
         return;
     }
 

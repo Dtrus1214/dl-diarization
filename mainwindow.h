@@ -47,6 +47,11 @@ private slots:
     void onWaveformSegmentClicked(int index);
     void onWaveformCursorSelected(double sec);
     void onWaveformLoadFinished(bool ok, const QString &message);
+    void onWaveCut();
+    void onWaveCopy();
+    void onWavePaste();
+    void onSaveEditedAudio();
+    void onWaveEditedChanged(bool dirty);
     void onToggleWaveformPlayback();
     void onPlayerPositionChanged(qint64 positionMs);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
@@ -100,6 +105,10 @@ private:
     QGroupBox *m_timelineCard;
     WaveformView *m_waveformView;
     QPushButton *m_playPauseButton;
+    QPushButton *m_waveCutButton;
+    QPushButton *m_waveCopyButton;
+    QPushButton *m_wavePasteButton;
+    QPushButton *m_waveSaveButton;
 
     QString m_selectedAudioPath;
     QString m_lastRawJson;
